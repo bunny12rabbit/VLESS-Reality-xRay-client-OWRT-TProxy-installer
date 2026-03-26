@@ -94,6 +94,6 @@ Run the installer again and choose:
 Run this on the router:
 
 ```sh
-wget -O /tmp/install.sh https://raw.githubusercontent.com/<YOUR_USERNAME>/<YOUR_REPO>/main/install.sh
+wget -O /tmp/install.sh https://raw.githubusercontent.com/bunny12rabbit/VLESS-Reality-xRay-client-OWRT-TProxy-installer/refs/heads/main/install.sh
 chmod +x /tmp/install.sh
 /tmp/install.sh
