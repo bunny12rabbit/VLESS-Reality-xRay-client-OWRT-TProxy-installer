@@ -51,9 +51,9 @@ ask() {
   prompt="$1"
   default="${2:-}"
   if [ -n "$default" ]; then
-    printf "%s [%s]: " "$prompt" "$default"
+    printf "%s [%s]: " "$prompt" "$default" >&2
   else
-    printf "%s: " "$prompt"
+    printf "%s: " "$prompt" >&2
   fi
   IFS= read -r value || true
   if [ -z "${value:-}" ]; then
