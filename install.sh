@@ -36,11 +36,10 @@
 # License:
 # - MIT
 
-#!/bin/ash
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.0"
+VERSION="1.1"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -49,13 +48,15 @@ XRAY_TPROXY_INIT="/etc/init.d/xray-tproxy"
 BACKUP_DIR_BASE="/root/xray-installer-backups"
 STATE_FILE="/root/.xray_tproxy_installer_state"
 
-# ---------- Colors ----------
-if [ -t 1 ]; then
+FORCE_COLOR="${FORCE_COLOR:-1}"
+
+if [ "$FORCE_COLOR" = "1" ] || [ -t 1 ] || [ -n "${TERM:-}" ]; then
   C_RESET="$(printf '\033[0m')"
   C_RED="$(printf '\033[31m')"
   C_GREEN="$(printf '\033[32m')"
   C_YELLOW="$(printf '\033[33m')"
   C_BLUE="$(printf '\033[34m')"
+  C_MAGENTA="$(printf '\033[35m')"
   C_CYAN="$(printf '\033[36m')"
   C_BOLD="$(printf '\033[1m')"
 else
@@ -64,6 +65,7 @@ else
   C_GREEN=""
   C_YELLOW=""
   C_BLUE=""
+  C_MAGENTA=""
   C_CYAN=""
   C_BOLD=""
 fi
@@ -72,6 +74,9 @@ info()  { echo "${C_CYAN}$*${C_RESET}"; }
 ok()    { echo "${C_GREEN}$*${C_RESET}"; }
 warn()  { echo "${C_YELLOW}$*${C_RESET}"; }
 err()   { echo "${C_RED}$*${C_RESET}" >&2; }
+note()  { echo "${C_BLUE}$*${C_RESET}"; }
+step()  { echo "${C_MAGENTA}${C_BOLD}$*${C_RESET}"; }
+title() { echo "${C_BOLD}${C_BLUE}$*${C_RESET}"; }
 die()   { err "ERROR: $*"; exit 1; }
 
 need_cmd() {
@@ -86,9 +91,9 @@ ask() {
   prompt="$1"
   default="${2:-}"
   if [ -n "$default" ]; then
-    printf "%s [%s]: " "$prompt" "$default"
+    printf "%s [%s]: " "$prompt" "$default" >&2
   else
-    printf "%s: " "$prompt"
+    printf "%s: " "$prompt" >&2
   fi
   IFS= read -r value || true
   if [ -z "${value:-}" ]; then
@@ -123,11 +128,6 @@ ask_yes_no() {
   done
 }
 
-pause_enter() {
-  printf "Press Enter to continue..."
-  IFS= read -r _ || true
-}
-
 validate_transport() {
   case "$1" in
     xhttp|tcp) return 0 ;;
@@ -157,10 +157,7 @@ backup_existing_files() {
   [ -f "$XRAY_CFG_FILE" ] && cp -a "$XRAY_CFG_FILE" "$bdir/config.json"
   [ -f "$XRAY_INIT" ] && cp -a "$XRAY_INIT" "$bdir/init_xray"
   [ -f "$XRAY_TPROXY_INIT" ] && cp -a "$XRAY_TPROXY_INIT" "$bdir/init_xray_tproxy"
-
-  if [ -d "$XRAY_CFG_DIR" ]; then
-    cp -a "$XRAY_CFG_DIR" "$bdir/xray_dir" 2>/dev/null || true
-  fi
+  [ -d "$XRAY_CFG_DIR" ] && cp -a "$XRAY_CFG_DIR" "$bdir/xray_dir" 2>/dev/null || true
 
   echo "$bdir" > "$STATE_FILE.backupdir"
   ok "Backup saved to: $bdir"
@@ -179,7 +176,6 @@ EOF
 
 load_state_if_present() {
   if [ -f "$STATE_FILE" ]; then
-    # shellcheck disable=SC1090
     . "$STATE_FILE"
     return 0
   fi
@@ -778,27 +774,12 @@ EOF
 
 validate_service_status() {
   svc="$1"
-  if /etc/init.d/"$svc" status >/dev/null 2>&1; then
-    out="$(/etc/init.d/"$svc" status 2>/dev/null || true)"
-    case "$out" in
-      *running*) ok "PASS: /etc/init.d/$svc status -> running" ;;
-      *) warn "WARN: /etc/init.d/$svc status -> ${out:-unknown}" ;;
-    esac
-  else
-    warn "WARN: /etc/init.d/$svc status not available"
-  fi
-}
-
-validate_command_nonempty() {
-  label="$1"
-  shift
-  out="$("$@" 2>/dev/null || true)"
-  if [ -n "$out" ]; then
-    ok "PASS: $label"
-    echo "$out"
-  else
-    err "FAIL: $label"
-  fi
+  out="$(/etc/init.d/"$svc" status 2>/dev/null || true)"
+  case "$out" in
+    *running*) ok "PASS: /etc/init.d/$svc status -> running" ;;
+    "") err "FAIL: /etc/init.d/$svc status unavailable" ;;
+    *) err "FAIL: /etc/init.d/$svc status -> $out" ;;
+  esac
 }
 
 validate_enabled_rc() {
@@ -810,24 +791,115 @@ validate_enabled_rc() {
   fi
 }
 
+validate_exact_match() {
+  label="$1"
+  expected="$2"
+  shift 2
+  out="$("$@" 2>/dev/null || true)"
+  if [ "$out" = "$expected" ]; then
+    ok "PASS: $label"
+    echo "$out"
+  else
+    err "FAIL: $label"
+    echo "Expected:"
+    echo "$expected"
+    echo "Got:"
+    echo "$out"
+  fi
+}
+
+validate_grep_match() {
+  label="$1"
+  pattern="$2"
+  shift 2
+  out="$("$@" 2>/dev/null || true)"
+  if printf '%s\n' "$out" | grep -F -q -- "$pattern"; then
+    ok "PASS: $label"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: $label"
+    printf '%s\n' "$out"
+  fi
+}
+
+validate_grep_all() {
+  label="$1"
+  shift
+  cmd="$1"
+  shift
+
+  out="$(sh -c "$cmd" 2>/dev/null || true)"
+  missing="0"
+
+  for pat in "$@"; do
+    if ! printf '%s\n' "$out" | grep -F -q -- "$pat"; then
+      missing="1"
+      err "Missing expected fragment for $label: $pat"
+    fi
+  done
+
+  if [ "$missing" = "0" ]; then
+    ok "PASS: $label"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: $label"
+    printf '%s\n' "$out"
+  fi
+}
+
+validate_xray_process_exact() {
+  out="$(ps w 2>/dev/null | grep '/usr/bin/xray run -config /etc/xray/config.json' | grep -v 'grep' || true)"
+  if [ -n "$out" ]; then
+    ok "PASS: xray process exists"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: xray process exists"
+  fi
+}
+
 run_post_install_validation() {
   echo
-  echo "${C_BOLD}=== Post-install validation ===${C_RESET}"
+  title "=== Post-install validation ==="
   echo "Xray config path: $XRAY_CFG_FILE"
   echo
 
   validate_service_status xray
   validate_enabled_rc xray-tproxy
 
-  validate_command_nonempty "ip rule show contains fwmark 0x111 lookup 111" sh -c "ip rule show | grep 'fwmark 0x111 lookup 111'"
-  validate_command_nonempty "ip route show table 111" sh -c "ip route show table 111"
-  validate_command_nonempty "iptables mangle XRAY chain exists" sh -c "iptables -t mangle -S XRAY"
-  validate_command_nonempty "iptables PREROUTING hooks to XRAY exist" sh -c "iptables -t mangle -S PREROUTING | grep XRAY"
-  validate_command_nonempty "xray listens on port 12345" sh -c "netstat -lnptu | grep 12345"
-  validate_command_nonempty "xray process exists" sh -c "ps w | grep '[x]ray'"
+  validate_grep_match \
+    "ip rule show contains fwmark 0x111 lookup 111" \
+    "fwmark 0x111 lookup 111" \
+    ip rule show
+
+  validate_exact_match \
+    "ip route show table 111" \
+    "local default dev lo scope host " \
+    sh -c "ip route show table 111"
+
+  validate_grep_all \
+    "iptables mangle XRAY chain exists with required rules" \
+    "iptables -t mangle -S XRAY" \
+    "-N XRAY" \
+    "-A XRAY -p tcp -j TPROXY --on-port 12345 --on-ip 0.0.0.0 --tproxy-mark 0x111/0x111" \
+    "-A XRAY -p udp -j TPROXY --on-port 12345 --on-ip 0.0.0.0 --tproxy-mark 0x111/0x111"
+
+  validate_grep_all \
+    "iptables PREROUTING hooks to XRAY exist" \
+    "iptables -t mangle -S PREROUTING" \
+    "-A PREROUTING -i br-lan -p tcp -j XRAY" \
+    "-A PREROUTING -i br-lan -p udp -j XRAY"
+
+  validate_grep_all \
+    "xray listens on port 12345" \
+    "netstat -lnptu | grep 12345" \
+    "tcp" \
+    "udp" \
+    "12345"
+
+  validate_xray_process_exact
 
   echo
-  echo "${C_BOLD}Manual traffic tests after validation:${C_RESET}"
+  title "=== Manual traffic tests after validation ==="
   echo "  - chatgpt.com"
   echo "  - youtube.com"
   echo "  - Discord"
@@ -847,13 +919,62 @@ preflight() {
   need_cmd awk
 }
 
+detect_interfaces() {
+  DETECTED_WAN_IF="$(ubus call network.interface.wan status | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+  DETECTED_LAN_IF="$(ubus call network.interface.lan status | jsonfilter -e '@.device' 2>/dev/null || true)"
+  [ -n "${DETECTED_LAN_IF:-}" ] || DETECTED_LAN_IF="br-lan"
+}
+
+collect_inputs() {
+  detect_interfaces
+
+  echo
+  title "=== Connection parameters ==="
+  note "Use your own server values. Defaults below are generic examples only."
+  echo
+
+  SERVER_HOST="$(ask_required "Server address / domain")"
+  SERVER_PORT="$(ask_required "Server port" "443")"
+  UUID="$(ask_required "UUID")"
+  PUBLIC_KEY="$(ask_required "Reality public key")"
+  SHORT_ID="$(ask_required "Reality short ID")"
+  SNI="$(ask_required "SNI / serverName" "google.com")"
+
+  TRANSPORT="$(ask_required "Protocol (xhttp or tcp)" "xhttp")"
+  validate_transport "$TRANSPORT" || die "Unsupported protocol: $TRANSPORT"
+
+  XHTTP_PATH=""
+  XHTTP_MODE=""
+  TCP_FLOW=""
+
+  if [ "$TRANSPORT" = "xhttp" ]; then
+    XHTTP_PATH="$(ask_required "XHTTP path" "/")"
+    XHTTP_MODE="$(ask_required "XHTTP mode" "stream-one")"
+  else
+    TCP_FLOW="$(ask_required "TCP flow" "xtls-rprx-vision")"
+  fi
+
+  echo
+  note "Detected WAN interface: ${DETECTED_WAN_IF:-unknown}"
+  note "Detected LAN interface: ${DETECTED_LAN_IF:-unknown}"
+
+  if ask_yes_no "Use detected WAN/LAN interfaces?" "y"; then
+    WAN_IF="${DETECTED_WAN_IF:-eth1}"
+    LAN_IF="${DETECTED_LAN_IF:-br-lan}"
+  else
+    WAN_IF="$(ask_required "WAN interface" "${DETECTED_WAN_IF:-eth1}")"
+    LAN_IF="$(ask_required "LAN interface" "${DETECTED_LAN_IF:-br-lan}")"
+  fi
+}
+
 install_or_upgrade_stack() {
   preflight
 
   echo
-  info "Updating package lists..."
+  step "== Step 1/6: Updating package lists =="
   opkg update
 
+  step "== Step 2/6: Checking dependencies =="
   install_pkg_if_missing ca-bundle
   install_pkg_if_missing ip-full
   install_pkg_if_missing jq
@@ -865,7 +986,7 @@ install_or_upgrade_stack() {
   XRAY_IPK_URL="$(ask "Direct xray-core .ipk URL (leave empty to install from repo)" "")"
 
   if [ -n "$XRAY_IPK_URL" ]; then
-    info "Installing xray-core from direct URL..."
+    step "== Step 3/6: Installing xray-core from direct URL =="
     cd /tmp
     rm -f /tmp/xray-core-custom.ipk
     if command -v wget >/dev/null 2>&1; then
@@ -877,42 +998,16 @@ install_or_upgrade_stack() {
     fi
     opkg install /tmp/xray-core-custom.ipk
   else
+    step "== Step 3/6: Ensuring xray-core is installed =="
     install_pkg_if_missing xray-core
   fi
 
   command -v xray >/dev/null 2>&1 || die "xray binary not found after install"
 
-  echo
-  SERVER_HOST="$(ask_required "Server address / domain")"
-  SERVER_PORT="$(ask_required "Server port" "9443")"
-  UUID="$(ask_required "UUID")"
-  PUBLIC_KEY="$(ask_required "Reality public key")"
-  SHORT_ID="$(ask_required "Reality short ID")"
-  SNI="$(ask_required "SNI / serverName" "artstation.com")"
-
-  TRANSPORT="$(ask_required "Protocol (xhttp or tcp)" "xhttp")"
-  validate_transport "$TRANSPORT" || die "Unsupported protocol: $TRANSPORT"
-
-  XHTTP_PATH=""
-  XHTTP_MODE=""
-  TCP_FLOW=""
-
-  if [ "$TRANSPORT" = "xhttp" ]; then
-    XHTTP_PATH="$(ask_required "XHTTP path" "/api/v2/data")"
-    XHTTP_MODE="$(ask_required "XHTTP mode" "stream-one")"
-  else
-    TCP_FLOW="$(ask_required "TCP flow" "xtls-rprx-vision")"
-  fi
-
-  DETECTED_WAN_IF="$(ubus call network.interface.wan status | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
-  DETECTED_LAN_IF="br-lan"
+  collect_inputs
 
   echo
-  WAN_IF="$(ask_required "WAN interface" "${DETECTED_WAN_IF:-eth1}")"
-  LAN_IF="$(ask_required "LAN interface" "$DETECTED_LAN_IF")"
-
-  echo
-  info "Backing up any existing Xray files..."
+  step "== Step 4/6: Backing up and generating files =="
   backup_existing_files
 
   mkdir -p "$XRAY_CFG_DIR"
@@ -925,10 +1020,8 @@ install_or_upgrade_stack() {
 
   write_xray_init
   write_xray_tproxy_init "$LAN_IF" "$SERVER_HOST"
-
   save_state
 
-  echo
   info "Validating generated Xray config..."
   xray run -test -config "$XRAY_CFG_FILE" || die "Generated Xray config is invalid."
 
@@ -947,7 +1040,7 @@ install_or_upgrade_stack() {
   fi
 
   echo
-  info "Enabling and starting services..."
+  step "== Step 5/6: Enabling services =="
   /etc/init.d/xray enable
   /etc/init.d/xray start
   /etc/init.d/xray-tproxy enable
@@ -955,14 +1048,15 @@ install_or_upgrade_stack() {
 
   sleep 2
 
+  step "== Step 6/6: Running validation =="
   run_post_install_validation
 
-  echo "${C_BOLD}Installed stack summary:${C_RESET}"
-  echo "  Xray config: $XRAY_CFG_FILE"
-  echo "  Xray init:   $XRAY_INIT"
-  echo "  TProxy init: $XRAY_TPROXY_INIT"
+  title "=== Installed stack summary ==="
+  echo "  Xray config path: $XRAY_CFG_FILE"
+  echo "  Xray init path:   $XRAY_INIT"
+  echo "  TProxy init path: $XRAY_TPROXY_INIT"
   echo
-  echo "${C_BOLD}After reboot:${C_RESET}"
+  note "After reboot:"
   echo "  Run this script again and choose:"
   echo "  2) Validate installed stack"
   echo
@@ -977,7 +1071,7 @@ validate_installed_stack() {
 
   if [ -f "$XRAY_CFG_FILE" ]; then
     ok "Found Xray config: $XRAY_CFG_FILE"
-    if xray run -test -config "$XRAY_CFG_FILE" >/dev/null 2>&1; then
+    if xray_check "$XRAY_CFG_FILE"; then
       ok "PASS: Xray config validates"
     else
       err "FAIL: Xray config validation failed"
@@ -991,8 +1085,8 @@ validate_installed_stack() {
 
 print_menu() {
   echo
-  echo "${C_BOLD}${APP_NAME} v${VERSION}${C_RESET}"
-  echo "OpenWrt / GL.iNet bootstrap for Xray + TProxy transparent proxy"
+  title "${APP_NAME} v${VERSION}"
+  note "OpenWrt / GL.iNet bootstrap for Xray + TProxy transparent proxy"
   echo
   echo "1) Install / upgrade Xray + TProxy stack"
   echo "2) Validate installed stack"
