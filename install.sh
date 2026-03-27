@@ -150,15 +150,12 @@ timestamp() {
 }
 
 backup_existing_files() {
-  mkdir -p "$BACKUP_DIR_BASE"
   bdir="$BACKUP_DIR_BASE/backup-$(timestamp)"
-  mkdir -p "$bdir"
-
+  mkdir -p "$BACKUP_DIR_BASE" "$bdir"
   [ -f "$XRAY_CFG_FILE" ] && cp -a "$XRAY_CFG_FILE" "$bdir/config.json"
   [ -f "$XRAY_INIT" ] && cp -a "$XRAY_INIT" "$bdir/init_xray"
   [ -f "$XRAY_TPROXY_INIT" ] && cp -a "$XRAY_TPROXY_INIT" "$bdir/init_xray_tproxy"
   [ -d "$XRAY_CFG_DIR" ] && cp -a "$XRAY_CFG_DIR" "$bdir/xray_dir" 2>/dev/null || true
-
   echo "$bdir" > "$STATE_FILE.backupdir"
   ok "Backup saved to: $bdir"
 }
@@ -1009,7 +1006,6 @@ install_or_upgrade_stack() {
   echo
   step "== Step 4/6: Backing up and generating files =="
   backup_existing_files
-
   mkdir -p "$XRAY_CFG_DIR"
 
   if [ "$TRANSPORT" = "xhttp" ]; then
