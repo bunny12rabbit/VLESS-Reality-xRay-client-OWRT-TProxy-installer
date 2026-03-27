@@ -825,6 +825,8 @@ preflight() {
 
 collect_inputs() {
   echo
+echo "=== Connection parameters ===" >&2
+  echo
   SERVER_HOST="$(ask_required "Server address / domain")"
   SERVER_PORT="$(ask_required "Server port" "9443")"
   UUID="$(ask_required "UUID")"
