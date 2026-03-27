@@ -2,7 +2,7 @@
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.1"
+VERSION="1.2-test"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -17,11 +17,15 @@ TMP_XRAY_CFG="/tmp/xray.config.test.json"
 TMP_XRAY_INIT="/tmp/xray.init.test"
 TMP_XRAY_TPROXY_INIT="/tmp/xray-tproxy.init.test"
 
-if [ -t 1 ]; then
+FORCE_COLOR="${FORCE_COLOR:-1}"
+
+if [ "$FORCE_COLOR" = "1" ] || [ -t 1 ] || [ -n "${TERM:-}" ]; then
   C_RESET="$(printf '\033[0m')"
   C_RED="$(printf '\033[31m')"
   C_GREEN="$(printf '\033[32m')"
   C_YELLOW="$(printf '\033[33m')"
+  C_BLUE="$(printf '\033[34m')"
+  C_MAGENTA="$(printf '\033[35m')"
   C_CYAN="$(printf '\033[36m')"
   C_BOLD="$(printf '\033[1m')"
 else
@@ -29,6 +33,8 @@ else
   C_RED=""
   C_GREEN=""
   C_YELLOW=""
+  C_BLUE=""
+  C_MAGENTA=""
   C_CYAN=""
   C_BOLD=""
 fi
@@ -37,6 +43,9 @@ info()  { echo "${C_CYAN}$*${C_RESET}"; }
 ok()    { echo "${C_GREEN}$*${C_RESET}"; }
 warn()  { echo "${C_YELLOW}$*${C_RESET}"; }
 err()   { echo "${C_RED}$*${C_RESET}" >&2; }
+note()  { echo "${C_BLUE}$*${C_RESET}"; }
+step()  { echo "${C_MAGENTA}${C_BOLD}$*${C_RESET}"; }
+title() { echo "${C_BOLD}${C_BLUE}$*${C_RESET}"; }
 die()   { err "ERROR: $*"; exit 1; }
 
 need_cmd() {
@@ -781,7 +790,7 @@ validate_command_nonempty() {
 
 run_live_stack_validation() {
   echo
-  echo "${C_BOLD}=== Live stack validation ===${C_RESET}"
+  title "=== Live stack validation ==="
   echo "Xray config path: $XRAY_CFG_FILE"
   echo
 
@@ -801,7 +810,7 @@ run_live_stack_validation() {
 run_generated_validation() {
   cfg="$1"
   echo
-  echo "${C_BOLD}=== Generated config validation ===${C_RESET}"
+  title "=== Generated config validation ==="
   echo "Generated test config path: $cfg"
   if xray_check "$cfg"; then
     ok "PASS: xray run -test -config $cfg"
@@ -825,14 +834,16 @@ preflight() {
 
 collect_inputs() {
   echo
-echo "=== Connection parameters ===" >&2
+  title "=== Connection parameters ==="
+  note "Use your own server values. Defaults below are generic examples only."
   echo
+
   SERVER_HOST="$(ask_required "Server address / domain")"
-  SERVER_PORT="$(ask_required "Server port" "9443")"
+  SERVER_PORT="$(ask_required "Server port" "443")"
   UUID="$(ask_required "UUID")"
   PUBLIC_KEY="$(ask_required "Reality public key")"
   SHORT_ID="$(ask_required "Reality short ID")"
-  SNI="$(ask_required "SNI / serverName" "artstation.com")"
+  SNI="$(ask_required "SNI / serverName" "google.com")"
 
   TRANSPORT="$(ask_required "Protocol (xhttp or tcp)" "xhttp")"
   validate_transport "$TRANSPORT" || die "Unsupported protocol: $TRANSPORT"
@@ -842,7 +853,7 @@ echo "=== Connection parameters ===" >&2
   TCP_FLOW=""
 
   if [ "$TRANSPORT" = "xhttp" ]; then
-    XHTTP_PATH="$(ask_required "XHTTP path" "/api/v2/data")"
+    XHTTP_PATH="$(ask_required "XHTTP path" "/")"
     XHTTP_MODE="$(ask_required "XHTTP mode" "stream-one")"
   else
     TCP_FLOW="$(ask_required "TCP flow" "xtls-rprx-vision")"
@@ -882,9 +893,10 @@ install_or_upgrade_stack() {
   preflight
 
   echo
-  info "Updating package lists..."
+  step "== Step 1/6: Updating package lists =="
   opkg update
 
+  step "== Step 2/6: Checking dependencies =="
   install_pkg_if_missing ca-bundle
   install_pkg_if_missing ip-full
   install_pkg_if_missing jq
@@ -896,7 +908,7 @@ install_or_upgrade_stack() {
   XRAY_IPK_URL="$(ask "Direct xray-core .ipk URL (leave empty to install from repo)" "")"
 
   if [ -n "$XRAY_IPK_URL" ]; then
-    info "Installing xray-core from direct URL..."
+    step "== Step 3/6: Installing xray-core from direct URL =="
     cd /tmp
     rm -f /tmp/xray-core-custom.ipk
     if command -v wget >/dev/null 2>&1; then
@@ -908,6 +920,7 @@ install_or_upgrade_stack() {
     fi
     opkg install /tmp/xray-core-custom.ipk
   else
+    step "== Step 3/6: Ensuring xray-core is installed =="
     install_pkg_if_missing xray-core
   fi
 
@@ -916,9 +929,8 @@ install_or_upgrade_stack() {
   collect_inputs
 
   echo
-  info "Backing up existing Xray files..."
+  step "== Step 4/6: Backing up and generating files =="
   backup_existing_files
-
   generate_temp_files
 
   info "Validating generated Xray config..."
@@ -938,11 +950,12 @@ install_or_upgrade_stack() {
     fi
   fi
 
+  step "== Step 5/6: Applying files =="
   apply_real_files
   save_state
 
   echo
-  info "Enabling and starting services..."
+  step "== Step 6/6: Enabling and starting services =="
   /etc/init.d/xray enable
   /etc/init.d/xray start
   /etc/init.d/xray-tproxy enable
@@ -952,12 +965,12 @@ install_or_upgrade_stack() {
 
   run_live_stack_validation
 
-  echo "${C_BOLD}Installed stack summary:${C_RESET}"
+  title "=== Installed stack summary ==="
   echo "  Xray config path: $XRAY_CFG_FILE"
   echo "  Xray init path:   $XRAY_INIT"
   echo "  TProxy init path: $XRAY_TPROXY_INIT"
   echo
-  echo "${C_BOLD}After reboot:${C_RESET}"
+  note "After reboot:"
   echo "  Run this script again and choose:"
   echo "  2) Validate installed stack"
   echo
@@ -989,13 +1002,14 @@ dry_run_generate_only() {
   preflight
 
   echo
+  title "=== Dry run mode ==="
   info "[DRY RUN] No live changes will be applied."
   info "[DRY RUN] No packages will be installed or removed."
   info "[DRY RUN] No services will be restarted."
   info "[DRY RUN] No iptables or ip rules will be modified."
 
   echo
-  info "[DRY RUN] Package resolution preview..."
+  step "== Step 1/4: Package resolution preview (read-only) =="
   opkg update
   install_pkg_if_missing ca-bundle
   install_pkg_if_missing ip-full
@@ -1010,16 +1024,20 @@ dry_run_generate_only() {
     warn "[DRY RUN] Generated config validation with xray -test will be skipped unless xray exists."
   fi
 
+  step "== Step 2/4: Collecting connection parameters =="
   collect_inputs
+
+  step "== Step 3/4: Generating temporary files =="
   generate_temp_files
 
   echo
-  echo "${C_BOLD}[DRY RUN] Generated files:${C_RESET}"
+  title "[DRY RUN] Generated files"
   echo "  $TMP_XRAY_CFG"
   echo "  $TMP_XRAY_INIT"
   echo "  $TMP_XRAY_TPROXY_INIT"
   echo
 
+  step "== Step 4/4: Validating generated config and current live state =="
   if command -v xray >/dev/null 2>&1; then
     run_generated_validation "$TMP_XRAY_CFG"
   else
@@ -1027,23 +1045,23 @@ dry_run_generate_only() {
     echo
   fi
 
-  echo "${C_BOLD}[DRY RUN] Live router validation against current state:${C_RESET}"
+  title "[DRY RUN] Live router validation against current state (read-only)"
   run_live_stack_validation
 
-  echo "${C_BOLD}[DRY RUN] Summary:${C_RESET}"
+  title "[DRY RUN] Summary"
   echo "  Would write Xray config to: $XRAY_CFG_FILE"
   echo "  Would write Xray init to:   $XRAY_INIT"
   echo "  Would write TProxy init to: $XRAY_TPROXY_INIT"
   echo "  Xray config path in final install: $XRAY_CFG_FILE"
   echo
-  echo "${C_BOLD}[DRY RUN] No changes were applied.${C_RESET}"
+  ok "[DRY RUN] No changes were applied."
   echo
 }
 
 print_menu() {
   echo
-  echo "${C_BOLD}${APP_NAME} v${VERSION}${C_RESET}"
-  echo "OpenWrt / GL.iNet bootstrap for Xray + TProxy transparent proxy"
+  title "${APP_NAME} v${VERSION}"
+  note "OpenWrt / GL.iNet bootstrap for Xray + TProxy transparent proxy"
   echo
   echo "1) Install / upgrade Xray + TProxy stack"
   echo "2) Validate installed stack"
