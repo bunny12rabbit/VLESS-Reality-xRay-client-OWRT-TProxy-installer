@@ -798,7 +798,7 @@ validate_grep_match() {
   pattern="$2"
   shift 2
   out="$("$@" 2>/dev/null || true)"
-  if printf '%s\n' "$out" | grep -F -q "$pattern"; then
+  if printf '%s\n' "$out" | grep -F -q -- "$pattern"; then
     ok "PASS: $label"
     printf '%s\n' "$out"
   else
@@ -815,8 +815,9 @@ validate_grep_all() {
 
   out="$(sh -c "$cmd" 2>/dev/null || true)"
   missing="0"
+
   for pat in "$@"; do
-    if ! printf '%s\n' "$out" | grep -F -q "$pat"; then
+    if ! printf '%s\n' "$out" | grep -F -q -- "$pat"; then
       missing="1"
       err "Missing expected fragment for $label: $pat"
     fi
