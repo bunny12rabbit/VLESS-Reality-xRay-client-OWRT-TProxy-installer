@@ -2,7 +2,7 @@
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.2-test"
+VERSION="1.3-test"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -762,8 +762,8 @@ validate_service_status() {
   out="$(/etc/init.d/"$svc" status 2>/dev/null || true)"
   case "$out" in
     *running*) ok "PASS: /etc/init.d/$svc status -> running" ;;
-    "") warn "WARN: /etc/init.d/$svc status unavailable" ;;
-    *) warn "WARN: /etc/init.d/$svc status -> $out" ;;
+    "") err "FAIL: /etc/init.d/$svc status unavailable" ;;
+    *) err "FAIL: /etc/init.d/$svc status -> $out" ;;
   esac
 }
 
@@ -776,15 +776,68 @@ validate_enabled_rc() {
   fi
 }
 
-validate_command_nonempty() {
+validate_exact_match() {
   label="$1"
-  shift
+  expected="$2"
+  shift 2
   out="$("$@" 2>/dev/null || true)"
-  if [ -n "$out" ]; then
+  if [ "$out" = "$expected" ]; then
     ok "PASS: $label"
     echo "$out"
   else
     err "FAIL: $label"
+    echo "Expected:"
+    echo "$expected"
+    echo "Got:"
+    echo "$out"
+  fi
+}
+
+validate_grep_match() {
+  label="$1"
+  pattern="$2"
+  shift 2
+  out="$("$@" 2>/dev/null || true)"
+  if printf '%s\n' "$out" | grep -F -q "$pattern"; then
+    ok "PASS: $label"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: $label"
+    printf '%s\n' "$out"
+  fi
+}
+
+validate_grep_all() {
+  label="$1"
+  shift
+  cmd="$1"
+  shift
+
+  out="$(sh -c "$cmd" 2>/dev/null || true)"
+  missing="0"
+  for pat in "$@"; do
+    if ! printf '%s\n' "$out" | grep -F -q "$pat"; then
+      missing="1"
+      err "Missing expected fragment for $label: $pat"
+    fi
+  done
+
+  if [ "$missing" = "0" ]; then
+    ok "PASS: $label"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: $label"
+    printf '%s\n' "$out"
+  fi
+}
+
+validate_xray_process_exact() {
+  out="$(ps w 2>/dev/null | grep '/usr/bin/xray run -config /etc/xray/config.json' | grep -v 'grep' || true)"
+  if [ -n "$out" ]; then
+    ok "PASS: xray process exists"
+    printf '%s\n' "$out"
+  else
+    err "FAIL: xray process exists"
   fi
 }
 
@@ -797,12 +850,37 @@ run_live_stack_validation() {
   validate_service_status xray
   validate_enabled_rc xray-tproxy
 
-  validate_command_nonempty "ip rule show contains fwmark 0x111 lookup 111" sh -c "ip rule show | grep 'fwmark 0x111 lookup 111'"
-  validate_command_nonempty "ip route show table 111" sh -c "ip route show table 111"
-  validate_command_nonempty "iptables mangle XRAY chain exists" sh -c "iptables -t mangle -S XRAY"
-  validate_command_nonempty "iptables PREROUTING hooks to XRAY exist" sh -c "iptables -t mangle -S PREROUTING | grep XRAY"
-  validate_command_nonempty "xray listens on port 12345" sh -c "netstat -lnptu | grep 12345"
-  validate_command_nonempty "xray process exists" sh -c "ps w | grep '[x]ray'"
+  validate_grep_match \
+    "ip rule show contains fwmark 0x111 lookup 111" \
+    "fwmark 0x111 lookup 111" \
+    ip rule show
+
+  validate_exact_match \
+    "ip route show table 111" \
+    "local default dev lo scope host " \
+    sh -c "ip route show table 111"
+
+  validate_grep_all \
+    "iptables mangle XRAY chain exists with required rules" \
+    "iptables -t mangle -S XRAY" \
+    "-N XRAY" \
+    "-A XRAY -p tcp -j TPROXY --on-port 12345 --on-ip 0.0.0.0 --tproxy-mark 0x111/0x111" \
+    "-A XRAY -p udp -j TPROXY --on-port 12345 --on-ip 0.0.0.0 --tproxy-mark 0x111/0x111"
+
+  validate_grep_all \
+    "iptables PREROUTING hooks to XRAY exist" \
+    "iptables -t mangle -S PREROUTING" \
+    "-A PREROUTING -i br-lan -p tcp -j XRAY" \
+    "-A PREROUTING -i br-lan -p udp -j XRAY"
+
+  validate_grep_all \
+    "xray listens on port 12345" \
+    "netstat -lnptu | grep 12345" \
+    "tcp" \
+    "udp" \
+    "12345"
+
+  validate_xray_process_exact
 
   echo
 }
@@ -832,7 +910,15 @@ preflight() {
   need_cmd awk
 }
 
+detect_interfaces() {
+  DETECTED_WAN_IF="$(ubus call network.interface.wan status | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+  DETECTED_LAN_IF="$(ubus call network.interface.lan status | jsonfilter -e '@.device' 2>/dev/null || true)"
+  [ -n "${DETECTED_LAN_IF:-}" ] || DETECTED_LAN_IF="br-lan"
+}
+
 collect_inputs() {
+  detect_interfaces
+
   echo
   title "=== Connection parameters ==="
   note "Use your own server values. Defaults below are generic examples only."
@@ -859,12 +945,17 @@ collect_inputs() {
     TCP_FLOW="$(ask_required "TCP flow" "xtls-rprx-vision")"
   fi
 
-  DETECTED_WAN_IF="$(ubus call network.interface.wan status | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
-  DETECTED_LAN_IF="br-lan"
-
   echo
-  WAN_IF="$(ask_required "WAN interface" "${DETECTED_WAN_IF:-eth1}")"
-  LAN_IF="$(ask_required "LAN interface" "$DETECTED_LAN_IF")"
+  note "Detected WAN interface: ${DETECTED_WAN_IF:-unknown}"
+  note "Detected LAN interface: ${DETECTED_LAN_IF:-unknown}"
+
+  if ask_yes_no "Use detected WAN/LAN interfaces?" "y"; then
+    WAN_IF="${DETECTED_WAN_IF:-eth1}"
+    LAN_IF="${DETECTED_LAN_IF:-br-lan}"
+  else
+    WAN_IF="$(ask_required "WAN interface" "${DETECTED_WAN_IF:-eth1}")"
+    LAN_IF="$(ask_required "LAN interface" "${DETECTED_LAN_IF:-br-lan}")"
+  fi
 }
 
 generate_temp_files() {
