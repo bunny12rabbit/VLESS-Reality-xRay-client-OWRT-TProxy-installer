@@ -135,14 +135,69 @@ validate_transport() {
   esac
 }
 
+# Install a package if it is not already present.
+#
+# Behaviour:
+#   - already installed under the exact package name
+#       → report OK, then offer an upgrade if one is available
+#   - not installed, opkg install succeeds
+#       → report OK
+#   - not installed, opkg install fails with a file-clash
+#       (i.e. another package already ships the same files)
+#       → warn and skip — NOT a fatal error
+#   - not installed, opkg install fails for any other reason
+#       → fatal
 install_pkg_if_missing() {
   pkg="$1"
-  if ! opkg list-installed | grep -q "^${pkg} "; then
-    info "Installing package: $pkg"
-    opkg install "$pkg"
-  else
+
+  # ── Already installed under this exact name ──────────────────────────────
+  if opkg list-installed | grep -q "^${pkg} "; then
     ok "Package already installed: $pkg"
+
+    # opkg update was already called in step 1, so list-upgradable is current.
+    upgrade_line="$(opkg list-upgradable 2>/dev/null | grep "^${pkg} " | head -n1 || true)"
+    if [ -n "$upgrade_line" ]; then
+      warn "Update available for $pkg: $upgrade_line"
+      if ask_yes_no "Install update for $pkg?" "n"; then
+        opkg upgrade "$pkg" || warn "Upgrade of $pkg failed; continuing with the installed version"
+      fi
+    fi
+    return 0
   fi
+
+  # ── Not installed — attempt installation ─────────────────────────────────
+  info "Installing package: $pkg"
+
+  # Run opkg and capture combined stdout+stderr so we can inspect errors.
+  # Using 'if cmd; then' keeps set -e from triggering on failure.
+  if install_out="$(opkg install "$pkg" 2>&1)"; then
+    ok "Installed: $pkg"
+    return 0
+  fi
+
+  # ── Installation failed — classify the error ─────────────────────────────
+
+  # File-clash: a different package already owns the files this one would place.
+  # Example output from opkg:
+  #   * check_data_file_clashes: Package nano wants to install file /usr/bin/nano
+  #           But that file is already provided by package  * nano-full
+  if printf '%s\n' "$install_out" | grep -q "check_data_file_clashes"; then
+    provider="$(printf '%s\n' "$install_out" \
+      | grep 'already provided by package' \
+      | sed 's/.*already provided by package[[:space:]]*//' \
+      | sed 's/^[[:space:]*]*//' \
+      | head -n1 || true)"
+    if [ -n "$provider" ]; then
+      warn "Skipping $pkg: files already provided by '$provider'"
+    else
+      warn "Skipping $pkg: file conflict with an existing package"
+    fi
+    return 0
+  fi
+
+  # Any other failure is fatal — surface the full opkg output.
+  printf '%s\n' "$install_out" >&2
+  die "Failed to install package: $pkg"
 }
 
 timestamp() {
@@ -913,7 +968,6 @@ preflight() {
   need_cmd ip
   need_cmd iptables
   need_cmd sed
-  need_cmd awk
 }
 
 detect_interfaces() {
