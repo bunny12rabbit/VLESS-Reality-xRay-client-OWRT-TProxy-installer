@@ -40,7 +40,7 @@
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.2"
+VERSION="1.3"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -289,16 +289,19 @@ install_xray_from_upstream_zip() {
     cp -a "$XRAY_BIN" "${XRAY_BIN}.bak.$(date +%Y%m%d-%H%M%S)"
   fi
 
-  install -m 0755 "$workdir/xray" "$XRAY_BIN"
+  cp "$workdir/xray" "$XRAY_BIN"
+  chmod 0755 "$XRAY_BIN"
 
   if [ -f "$workdir/geoip.dat" ]; then
     mkdir -p /usr/share/xray
-    install -m 0644 "$workdir/geoip.dat" /usr/share/xray/geoip.dat
+    cp "$workdir/geoip.dat" /usr/share/xray/geoip.dat
+    chmod 0644 /usr/share/xray/geoip.dat
   fi
 
   if [ -f "$workdir/geosite.dat" ]; then
     mkdir -p /usr/share/xray
-    install -m 0644 "$workdir/geosite.dat" /usr/share/xray/geosite.dat
+    cp "$workdir/geosite.dat" /usr/share/xray/geosite.dat
+    chmod 0644 /usr/share/xray/geosite.dat
   fi
 
   "$XRAY_BIN" version || die "Installed Xray binary does not run."
