@@ -94,6 +94,8 @@ Run the installer again and choose:
 Run this on the router:
 
 ```sh
-wget -O /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh https://raw.githubusercontent.com/bunny12rabbit/VLESS-Reality-xRay-client-OWRT-TProxy-installer/refs/heads/main/install.sh
-chmod +x /tmpVLESS-Reality-xRay-client-OWRT-TProxy-installer//install.sh
+mkdir -p /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer
+wget -O /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh \
+  https://raw.githubusercontent.com/bunny12rabbit/VLESS-Reality-xRay-client-OWRT-TProxy-installer/refs/heads/main/install.sh
+chmod +x /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh
 /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh
