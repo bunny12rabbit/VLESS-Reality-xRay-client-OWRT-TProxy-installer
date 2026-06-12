@@ -7,7 +7,8 @@
 #
 # Features:
 # - installs required dependencies with opkg
-# - installs xray-core from repo or direct .ipk URL
+# - installs Xray from latest upstream GitHub ZIP
+# - optionally installs xray-core from direct local/remote .ipk
 # - supports VLESS + REALITY with:
 #   - XHTTP
 #   - TCP
@@ -39,7 +40,7 @@
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.1"
+VERSION="1.2"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -47,6 +48,9 @@ XRAY_INIT="/etc/init.d/xray"
 XRAY_TPROXY_INIT="/etc/init.d/xray-tproxy"
 BACKUP_DIR_BASE="/root/xray-installer-backups"
 STATE_FILE="/root/.xray_tproxy_installer_state"
+XRAY_BIN="/usr/bin/xray"
+XRAY_RELEASE_API="https://api.github.com/repos/XTLS/Xray-core/releases/latest"
+XRAY_RELEASE_FALLBACK_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-arm64-v8a.zip"
 
 FORCE_COLOR="${FORCE_COLOR:-1}"
 
@@ -72,7 +76,7 @@ fi
 
 info()  { echo "${C_CYAN}$*${C_RESET}"; }
 ok()    { echo "${C_GREEN}$*${C_RESET}"; }
-warn()  { echo "${C_YELLOW}$*${C_RESET}"; }
+warn()  { echo "${C_YELLOW}$*${C_RESET}" >&2; }
 err()   { echo "${C_RED}$*${C_RESET}" >&2; }
 note()  { echo "${C_BLUE}$*${C_RESET}"; }
 step()  { echo "${C_MAGENTA}${C_BOLD}$*${C_RESET}"; }
@@ -198,6 +202,153 @@ install_pkg_if_missing() {
   # Any other failure is fatal — surface the full opkg output.
   printf '%s\n' "$install_out" >&2
   die "Failed to install package: $pkg"
+}
+
+download_file() {
+  url="$1"
+  dst="$2"
+
+  if command -v wget >/dev/null 2>&1; then
+    wget -O "$dst" "$url"
+    return 0
+  fi
+
+  if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -O "$dst" "$url"
+    return 0
+  fi
+
+  die "Neither wget nor uclient-fetch is available."
+}
+
+detect_xray_asset_name() {
+  case "$(uname -m)" in
+    aarch64|armv8*) echo "Xray-linux-arm64-v8a.zip" ;;
+    x86_64|amd64) echo "Xray-linux-64.zip" ;;
+    armv7l|armv7*) echo "Xray-linux-arm32-v7a.zip" ;;
+    armv6l|armv6*) echo "Xray-linux-arm32-v6.zip" ;;
+    armv5l|armv5*) echo "Xray-linux-arm32-v5.zip" ;;
+    mips64le) echo "Xray-linux-mips64le.zip" ;;
+    mips64) echo "Xray-linux-mips64.zip" ;;
+    mipsle) echo "Xray-linux-mips32le.zip" ;;
+    mips) echo "Xray-linux-mips32.zip" ;;
+    *) die "Unsupported architecture for upstream Xray ZIP: $(uname -m)" ;;
+  esac
+}
+
+get_latest_xray_zip_url() {
+  asset_name="$(detect_xray_asset_name)"
+  api_json="/tmp/xray-release-latest.json"
+
+  rm -f "$api_json"
+  if download_file "$XRAY_RELEASE_API" "$api_json"; then
+    url="$(jq -r --arg name "$asset_name" '
+      .assets[]?
+      | select(.name == $name)
+      | .browser_download_url
+    ' "$api_json" 2>/dev/null | head -n1)"
+
+    if [ -n "$url" ] && [ "$url" != "null" ]; then
+      echo "$url"
+      return 0
+    fi
+  fi
+
+  if [ "$asset_name" = "Xray-linux-arm64-v8a.zip" ]; then
+    warn "Could not resolve latest release URL from GitHub API. Falling back to latest/download URL."
+    echo "$XRAY_RELEASE_FALLBACK_URL"
+    return 0
+  fi
+
+  die "Could not resolve latest Xray ZIP URL for asset: $asset_name"
+}
+
+install_xray_from_upstream_zip() {
+  step "== Step 3/6: Installing latest upstream Xray from GitHub ZIP =="
+
+  need_cmd jq
+  need_cmd unzip
+
+  workdir="/tmp/xray-upstream-install"
+  zip_path="/tmp/xray-upstream.zip"
+  url="$(get_latest_xray_zip_url)"
+
+  rm -rf "$workdir" "$zip_path"
+  mkdir -p "$workdir"
+
+  info "Downloading Xray ZIP:"
+  echo "$url"
+  download_file "$url" "$zip_path"
+
+  unzip -oq "$zip_path" -d "$workdir"
+
+  [ -x "$workdir/xray" ] || chmod +x "$workdir/xray" 2>/dev/null || true
+  [ -x "$workdir/xray" ] || die "Xray binary was not found in downloaded ZIP."
+
+  if [ -x "$XRAY_BIN" ]; then
+    cp -a "$XRAY_BIN" "${XRAY_BIN}.bak.$(date +%Y%m%d-%H%M%S)"
+  fi
+
+  install -m 0755 "$workdir/xray" "$XRAY_BIN"
+
+  if [ -f "$workdir/geoip.dat" ]; then
+    mkdir -p /usr/share/xray
+    install -m 0644 "$workdir/geoip.dat" /usr/share/xray/geoip.dat
+  fi
+
+  if [ -f "$workdir/geosite.dat" ]; then
+    mkdir -p /usr/share/xray
+    install -m 0644 "$workdir/geosite.dat" /usr/share/xray/geosite.dat
+  fi
+
+  "$XRAY_BIN" version || die "Installed Xray binary does not run."
+}
+
+install_xray_from_ipk() {
+  ipk_source="$1"
+  step "== Step 3/6: Installing xray-core from direct IPK =="
+
+  case "$ipk_source" in
+    http://*|https://*)
+      ipk_path="/tmp/xray-core-custom.ipk"
+      rm -f "$ipk_path"
+      download_file "$ipk_source" "$ipk_path"
+      ;;
+    *)
+      ipk_path="$ipk_source"
+      [ -f "$ipk_path" ] || die "Local IPK file not found: $ipk_path"
+      ;;
+  esac
+
+  opkg install "$ipk_path"
+  
+  command -v xray >/dev/null 2>&1 || die "xray binary not found after IPK install"
+  xray version || die "Installed Xray binary does not run."
+}
+
+install_xray_binary() {
+  echo
+  echo "Select Xray install source:"
+  echo "1) Latest upstream Xray binary from GitHub ZIP (recommended)"
+  echo "2) Direct local/remote xray-core .ipk"
+  printf "Choice [1-2]: "
+  IFS= read -r xray_source_choice || true
+  xray_source_choice="${xray_source_choice:-1}"
+
+  case "$xray_source_choice" in
+    1)
+      install_xray_from_upstream_zip
+      ;;
+    2)
+      XRAY_IPK_SOURCE="$(ask_required "Direct xray-core .ipk URL or local path")"
+      install_xray_from_ipk "$XRAY_IPK_SOURCE"
+      ;;
+    *)
+      die "Invalid Xray install source: $xray_source_choice"
+      ;;
+  esac
+
+  command -v xray >/dev/null 2>&1 || die "xray binary not found after install"
 }
 
 timestamp() {
@@ -1029,32 +1180,14 @@ install_or_upgrade_stack() {
   install_pkg_if_missing ca-bundle
   install_pkg_if_missing ip-full
   install_pkg_if_missing jq
-  install_pkg_if_missing nano
+  install_pkg_if_missing nano-full
+  install_pkg_if_missing unzip
   install_pkg_if_missing iptables-mod-tproxy
   install_pkg_if_missing kmod-ipt-tproxy
 
   echo
-  XRAY_IPK_URL="$(ask "Direct xray-core .ipk URL (leave empty to install from repo)" "")"
-
-  if [ -n "$XRAY_IPK_URL" ]; then
-    step "== Step 3/6: Installing xray-core from direct URL =="
-    cd /tmp
-    rm -f /tmp/xray-core-custom.ipk
-    if command -v wget >/dev/null 2>&1; then
-      wget -O /tmp/xray-core-custom.ipk "$XRAY_IPK_URL"
-    elif command -v uclient-fetch >/dev/null 2>&1; then
-      uclient-fetch -O /tmp/xray-core-custom.ipk "$XRAY_IPK_URL"
-    else
-      die "Neither wget nor uclient-fetch is available."
-    fi
-    opkg install /tmp/xray-core-custom.ipk
-  else
-    step "== Step 3/6: Ensuring xray-core is installed =="
-    install_pkg_if_missing xray-core
-  fi
-
-  command -v xray >/dev/null 2>&1 || die "xray binary not found after install"
-
+  
+  install_xray_binary
   collect_inputs
 
   echo
