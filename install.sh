@@ -24,9 +24,11 @@
 # - /etc/init.d/xray-tproxy
 #
 # Usage:
-#   wget -O /tmp/install.sh https://raw.githubusercontent.com/<YOUR_USERNAME>/<YOUR_REPO>/main/install.sh
-#   chmod +x /tmp/install.sh
-#   /tmp/install.sh
+#mkdir -p /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer
+#wget -O /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh \
+#  https://raw.githubusercontent.com/bunny12rabbit/VLESS-Reality-xRay-client-OWRT-TProxy-installer/refs/heads/main/install.sh
+#chmod +x /tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh
+#/tmp/VLESS-Reality-xRay-client-OWRT-TProxy-installer/install.sh
 #
 # Notes:
 # - run as root
@@ -40,7 +42,7 @@
 set -eu
 
 APP_NAME="Xray OpenWrt TProxy Installer"
-VERSION="1.3"
+VERSION="1.4"
 
 XRAY_CFG_DIR="/etc/xray"
 XRAY_CFG_FILE="/etc/xray/config.json"
@@ -838,7 +840,8 @@ write_xray_config_xhttp() {
             "users": [
               {
                 "id": "$(json_escape "$uuid")",
-                "encryption": "none"
+                "encryption": "none",
+                "packetEncoding": "xudp"
               }
             ]
           }
@@ -857,7 +860,16 @@ write_xray_config_xhttp() {
         "xhttpSettings": {
           "path": "$(json_escape "$xhttp_path")",
           "mode": "$(json_escape "$xhttp_mode")",
-          "host": "$(json_escape "$sni")"
+          "host": "$(json_escape "$sni")",
+          "extra": {
+            "xmux": {
+              "maxConcurrency": 64,
+              "cMaxReuseTimes": 0,
+              "hMaxRequestTimes": "600-900",
+              "hMaxReusableSecs": "1800-3000",
+              "hKeepAlivePeriod": 0
+            }
+          }
         },
         "sockopt": {
           "interface": "$(json_escape "$wan_if")"
@@ -1154,7 +1166,7 @@ collect_inputs() {
 
   if [ "$TRANSPORT" = "xhttp" ]; then
     XHTTP_PATH="$(ask_required "XHTTP path" "/")"
-    XHTTP_MODE="$(ask_required "XHTTP mode" "stream-one")"
+    XHTTP_MODE="$(ask_required "XHTTP mode" "stream-up")"
   else
     TCP_FLOW="$(ask_required "TCP flow" "xtls-rprx-vision")"
   fi
